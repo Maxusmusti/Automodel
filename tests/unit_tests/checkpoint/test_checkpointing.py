@@ -592,6 +592,39 @@ def test_divide_keys_by_size_places_oversized_tensor_alone():
     }
 
 
+def test_consolidated_index_excludes_osft_factors(tmp_path):
+    """HF exports carry each OSFT layer's merged ``weight``; its factors stay in the resumable checkpoint."""
+
+    class FakeTensor:
+        def numel(self):
+            return 1
+
+        def element_size(self):
+            return 1
+
+    config = CheckpointingConfig(
+        enabled=True,
+        checkpoint_dir=str(tmp_path),
+        model_save_format="safetensors",
+        model_cache_dir=str(tmp_path / "cache"),
+        model_repo_id="config-only/model",
+        save_consolidated=False,
+        is_peft=False,
+    )
+    with patch("torch.distributed.is_initialized", return_value=False):
+        checkpointer = Checkpointer(config, dp_rank=0, tp_rank=0, pp_rank=0, moe_mesh=None)
+    keys = ["q_proj.weight", "q_proj.bias", "q_proj.osft_U_high", "q_proj.osft_S_low", "norm.weight"]
+    state_dict = {key: FakeTensor() for key in keys}
+    model_state = SimpleNamespace(model=[SimpleNamespace(_pre_shard_hf_state_dict_keys=None)])
+
+    with patch(
+        "nemo_automodel.components.checkpoint.checkpointing._get_hf_safetensors_reference_path", return_value=None
+    ):
+        mapping = checkpointer._maybe_build_consolidated_index(model_state, state_dict)
+
+    assert set(mapping) == {"q_proj.weight", "q_proj.bias", "norm.weight"}
+
+
 def test_missing_original_hf_index_uses_size_based_consolidated_mapping(tmp_path, caplog):
     class FakeTensor:
         def __init__(self, bytes_: int):

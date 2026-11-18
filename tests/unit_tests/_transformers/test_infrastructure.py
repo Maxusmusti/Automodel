@@ -1275,3 +1275,76 @@ def test_checkpoint_load_order_includes_cp_sharding(dp_shard_size: int, cp_size:
         ["initialize", "load", "shard"] if (dp_shard_size, cp_size) == (1, 1) else ["shard", "initialize", "load"]
     )
     assert [event[0] for event in events.mock_calls] == expected
+
+
+class _TinyOSFTTargetModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(8, 12, bias=True)
+        self.lm_head = torch.nn.Linear(12, 5, bias=False)
+
+    def forward(self, x):
+        return self.lm_head(self.q_proj(x))
+
+
+def _apply_single_rank(model, **kwargs):
+    from nemo_automodel._transformers.infrastructure import apply_model_infrastructure
+    from nemo_automodel.components.distributed import DDPConfig, MeshContext
+
+    with (
+        patch(f"{_INFRA_MODULE}.get_world_size_safe", return_value=1),
+        patch(f"{_INFRA_MODULE}._supports_logits_to_keep", return_value=True),
+        patch(f"{_INFRA_MODULE}.print_trainable_parameters"),
+        patch(f"{_INFRA_MODULE}._should_load_before_shard", return_value=False),
+        patch(f"{_INFRA_MODULE}._shard_ep_fsdp", side_effect=lambda model, *a, **k: model),
+        patch(f"{_INFRA_MODULE}.Checkpointer") as MockCheckpointer,
+    ):
+        MockCheckpointer.return_value.config = MagicMock(dequantize_base_checkpoint=False)
+        return apply_model_infrastructure(
+            model=model,
+            is_meta_device=False,
+            device=torch.device("cpu"),
+            load_base_model=False,
+            model_wrapper=MeshContext(strategy_config=DDPConfig()),
+            **kwargs,
+        )
+
+
+def test_apply_model_infrastructure_applies_osft_to_materialized_model():
+    """Targets are decomposed from already-loaded weights and the HF export layout keeps dense keys only."""
+    from nemo_automodel.components._peft.osft import OSFTConfig, OSFTLinear
+
+    torch.manual_seed(0)
+    model = _TinyOSFTTargetModel()
+    x = torch.randn(3, 8)
+    expected = model(x).detach()
+
+    result = _apply_single_rank(model, osft_config=OSFTConfig(target_modules=["q_proj"]))
+
+    assert isinstance(result.q_proj, OSFTLinear) and result.q_proj._osft_initialized
+    assert type(result.lm_head) is torch.nn.Linear
+    torch.testing.assert_close(result(x), expected, rtol=1e-5, atol=1e-5)
+    keys = set(result._pre_shard_hf_state_dict_keys)
+    assert {"q_proj.weight", "q_proj.bias", "lm_head.weight"} <= keys
+    assert not any(".osft_" in key for key in keys)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"peft_config": MagicMock()}, "peft"),
+        ({"mesh": "tp"}, "tensor parallelism"),
+        ({"mesh": "ep"}, "expert parallelism"),
+    ],
+)
+def test_osft_rejects_unsupported_combinations(kwargs, message):
+    from nemo_automodel._transformers.infrastructure import _validate_osft_support
+    from nemo_automodel.components.distributed import MeshContext
+
+    mesh = MeshContext()
+    if kwargs.get("mesh") == "tp":
+        mesh = MagicMock(tp_size=2, ep_size=1)
+    elif kwargs.get("mesh") == "ep":
+        mesh = MagicMock(tp_size=1, ep_size=2)
+    with pytest.raises(NotImplementedError, match=message):
+        _validate_osft_support(kwargs.get("peft_config"), None, None, None, mesh, None)

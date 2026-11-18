@@ -2227,16 +2227,14 @@ fi
         # Use default of 1 only when the exported state dict itself has no mapped tensor keys.
         default_index = max(fqn_to_file_index_mapping.values()) if fqn_to_file_index_mapping else 1
 
-        # OSFT factors (``*.osft_*``, see _peft.osft.OSFT_KEY_MARKER) stay in the resumable checkpoint only;
-        # the HF export carries each OSFT layer's merged dense ``weight`` instead.
-        excluded_keys.update(k for k in state_dict if ".osft_" in k)
-
         # add any additional keys that are not in the base checkpoint
         additional_keys = dict.fromkeys([*(pre_shard_hf_state_dict_keys or ()), *state_dict])
         for fqn in additional_keys:
             if fqn not in excluded_keys:
                 fqn_to_file_index_mapping[fqn] = fqn_to_file_index_mapping.get(fqn, default_index)
-        return fqn_to_file_index_mapping
+        # OSFT factors (``*.osft_*``, see _peft.osft.OSFT_KEY_MARKER) stay in the resumable checkpoint only;
+        # the HF export carries each OSFT layer's merged dense ``weight`` instead.
+        return {fqn: idx for fqn, idx in fqn_to_file_index_mapping.items() if ".osft_" not in fqn}
 
     def _maybe_build_original_dtype_mapping(
         self, model_state: ModelState, state_dict: dict[str, torch.Tensor]
