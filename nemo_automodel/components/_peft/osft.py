@@ -375,11 +375,16 @@ def _assign(param: nn.Parameter, full: torch.Tensor) -> None:
         param.data.copy_(full)
 
 
+def _svd_dtype(module: OSFTLinear) -> torch.dtype:
+    """SVD precision: at least fp32 (as mini_trainer), never below the factors' own dtype."""
+    return torch.promote_types(module.osft_U_high.dtype, torch.float32)
+
+
 @torch.no_grad()
 def initialize_osft(model_parts: nn.Module | list[nn.Module]) -> int:
     """Decompose every stashed base weight into OSFT factors.
 
-    The SVDs run in fp32 on GPU, distributed round-robin over the factors' process group: in each round
+    The SVDs run in (at least) fp32 on GPU, distributed round-robin over the factors' process group: in each round
     every rank all-gathers the next ``world_size`` weights, decomposes the one it owns, and broadcasts
     the factors back over NCCL. Each rank then keeps its own shard.
 
@@ -405,7 +410,7 @@ def initialize_osft(model_parts: nn.Module | list[nn.Module]) -> int:
             base = module._base_weight
             full = base.full_tensor() if isinstance(base, DTensor) else base
             if owner == rank:
-                owned = full.to(device=device, dtype=torch.float32)
+                owned = full.to(device=device, dtype=_svd_dtype(module))
             del full
         factors = None
         if owned is not None:
@@ -423,9 +428,10 @@ def initialize_osft(model_parts: nn.Module | list[nn.Module]) -> int:
             if owner == rank:
                 u, s, v = factors
             else:
-                u = torch.empty(n, full_rank, device=device, dtype=torch.float32)
-                s = torch.empty(full_rank, device=device, dtype=torch.float32)
-                v = torch.empty(m, full_rank, device=device, dtype=torch.float32)
+                kw = {"device": device, "dtype": _svd_dtype(module)}
+                u = torch.empty(n, full_rank, **kw)
+                s = torch.empty(full_rank, **kw)
+                v = torch.empty(m, full_rank, **kw)
             if group is not None:
                 src = dist.get_global_rank(group, owner)
                 for t in (u, s, v):
@@ -505,17 +511,19 @@ class OSFTProjector:
                 self._project_bucket(bucket)
 
     def _project_bucket(self, bucket: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
-        coeffs = [basis.t().float() @ target.float() for basis, target in bucket]
+        # At least fp32 (mini_trainer parity), never below the tensors' own precision.
+        dtype = torch.promote_types(bucket[0][1].dtype, torch.float32)
+        coeffs = [basis.t().to(dtype) @ target.to(dtype) for basis, target in bucket]
         if self.distributed:
             flat = torch.cat([c.reshape(-1) for c in coeffs])
             dist.all_reduce(flat, group=self.group)
             coeffs = list(torch.split(flat, [c.numel() for c in coeffs]))
         for (basis, target), coeff in zip(bucket, coeffs):
             coeff = coeff.view(basis.shape[1], target.shape[1])
-            if target.dtype == torch.float32 and basis.dtype == torch.float32:
+            if target.dtype == dtype and basis.dtype == dtype:
                 target.addmm_(basis, coeff, alpha=-1.0)
             else:
-                target.sub_((basis.float() @ coeff).to(target.dtype))
+                target.sub_((basis.to(dtype) @ coeff).to(target.dtype))
 
     def project_gradients(self) -> None:
         """Remove the frozen-subspace component of the low-rank factor gradients."""
