@@ -592,6 +592,11 @@ class ModelState:
             for k in keys_to_remove:
                 model_state_dict.pop(k)
 
+        # OSFT factors (``*.osft_*``) are derived from the base ``weight`` after loading, so a base
+        # checkpoint never contains them. The dense ``weight`` entry of each OSFT layer is loaded instead.
+        for k in [k for k in model_state_dict.keys() if ".osft_" in k]:
+            model_state_dict.pop(k)
+
         if self.skip_task_head_prefixes:
             # Remove task-specific heads when loading base model for fine-tuning
             # These layers don't exist in base pretrained models and will be randomly initialized

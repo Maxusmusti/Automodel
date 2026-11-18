@@ -422,6 +422,7 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
         kwargs = dict(kwargs)  # Defensive copy so retries get clean state
         has_packed_sequence = kwargs.pop("has_packed_sequence", False)
         freeze_config = kwargs.pop("freeze_config", None)
+        osft_config = kwargs.pop("osft_config", None)
         load_metadata_with_gloo = kwargs.pop("load_metadata_with_gloo", False)
         cache_dir = kwargs.pop("cache_dir", hf_constants.HF_HUB_CACHE)
         if isinstance(pretrained_model_name_or_path_or_config, str):
@@ -436,6 +437,7 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
                 **kwargs,
                 "has_packed_sequence": has_packed_sequence,
                 "freeze_config": freeze_config,
+                "osft_config": osft_config,
                 "load_metadata_with_gloo": load_metadata_with_gloo,
                 "cache_dir": cache_dir,
             }
@@ -661,6 +663,7 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
             load_base_model=load_base_model,
             cache_dir=cache_dir,
             freeze_config=freeze_config,
+            osft_config=osft_config,
             weights_already_loaded=weights_already_loaded,
             inject_te_attention=inject_te_attention,
             load_metadata_with_gloo=load_metadata_with_gloo,

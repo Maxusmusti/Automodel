@@ -773,6 +773,9 @@ def _write_overall_metadata_file_from_shards(
     weight_map = {}
 
     for fqn, (tensor_shape, dtype_str) in fqn_to_size_mapping.items():
+        if fqn not in fqn_to_index_mapping:
+            # Not part of the export (e.g. OSFT factors); the shard writer skips it too.
+            continue
         output_dtype, _ = _resolve_output_dtype(
             fqn,
             dtype_str,
