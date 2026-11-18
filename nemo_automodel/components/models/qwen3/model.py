@@ -383,6 +383,8 @@ class Qwen3ForCausalLM(HFCheckpointingMixin, Qwen3PreTrainedModel, GenerationMix
         supports_cp: bool = True
         supports_pp: bool = True
         supports_ep: bool = False
+        # Decoder layers only write state through ``past_key_values``, which training never passes.
+        supports_full_layer_activation_checkpointing: bool = True
 
     def __init__(self, config: Qwen3Config, backend: BackendConfig | None = None) -> None:
         super().__init__(config)

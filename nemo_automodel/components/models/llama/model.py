@@ -552,6 +552,8 @@ class LlamaForCausalLM(HFCheckpointingMixin, LlamaPreTrainedModel):
         supports_cp: bool = True
         supports_pp: bool = True
         supports_ep: bool = False
+        # Decoder layers only write state through ``past_key_values``, which training never passes.
+        supports_full_layer_activation_checkpointing: bool = True
 
     @classmethod
     def from_config(
