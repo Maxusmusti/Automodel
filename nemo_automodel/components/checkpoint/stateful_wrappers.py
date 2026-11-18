@@ -592,8 +592,8 @@ class ModelState:
             for k in keys_to_remove:
                 model_state_dict.pop(k)
 
-        # OSFT factors (``*.osft_*``) are derived from the base ``weight`` after loading, so a base
-        # checkpoint never contains them. The dense ``weight`` entry of each OSFT layer is loaded instead.
+        # OSFT factors (``*.osft_*``, see _peft.osft.OSFT_KEY_MARKER) are derived from the base ``weight``
+        # after loading, so a base checkpoint never contains them; each OSFT layer loads its dense ``weight``.
         for k in [k for k in model_state_dict.keys() if ".osft_" in k]:
             model_state_dict.pop(k)
 

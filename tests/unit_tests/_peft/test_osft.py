@@ -26,8 +26,6 @@ from nemo_automodel.components._peft.osft import (
     initialize_osft,
 )
 
-torch.backends.cuda.matmul.allow_tf32 = False
-
 
 def _make_layer(n=48, m=32, urr=0.25, mode="auto", bias=False, seed=0):
     gen = torch.Generator().manual_seed(seed)
@@ -162,3 +160,28 @@ def test_state_dict_with_factors_resumes_exactly():
 )
 def test_choose_path_matches_measured_winner(tokens, n, m, rank_high, rank_low, expected):
     assert _choose_path(tokens, n, m, rank_high, rank_low) == expected
+
+
+def test_apply_osft_carries_over_materialized_weights():
+    """Weights loaded before the swap (e.g. weights_already_loaded) must survive into the factors."""
+    model = _Block().double()
+    ref_q = (model.q_proj.weight.detach().clone(), model.q_proj.bias.detach().clone())
+    apply_osft(model, OSFTConfig(target_modules=["q_proj"]))
+    torch.testing.assert_close(model.q_proj.bias.detach(), ref_q[1])
+    initialize_osft(model)
+    x = torch.randn(5, 16, dtype=torch.float64)
+    torch.testing.assert_close(model.q_proj(x), F.linear(x, *ref_q), rtol=1e-10, atol=1e-10)
+
+
+def test_strict_load_still_reports_unexpected_keys():
+    layer, _ = _make_layer(bias=True)
+    state = layer.state_dict()
+    state["not_a_param"] = torch.zeros(1)
+    with pytest.raises(RuntimeError, match="not_a_param"):
+        layer.load_state_dict(state, strict=True)
+
+
+def test_missing_base_weight_explains_from_config():
+    layer = OSFTLinear(32, 48, 24, bias=False)
+    with pytest.raises(RuntimeError, match="from_pretrained"):
+        initialize_osft(layer)

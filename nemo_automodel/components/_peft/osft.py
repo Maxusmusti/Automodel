@@ -38,6 +38,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Literal
 
@@ -46,13 +47,17 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import empty as dtensor_empty
 
 from nemo_automodel.components._peft.module_matcher import ModuleMatcher
 
 logger = logging.getLogger(__name__)
 
 OSFT_PARAM_PREFIX = "osft_"
-"""Prefix of every OSFT factor parameter name. Base-checkpoint loading drops keys containing it."""
+"""Prefix of every OSFT factor parameter name."""
+
+OSFT_KEY_MARKER = "." + OSFT_PARAM_PREFIX
+"""Substring identifying OSFT factor keys in a model state dict (``<module path>.osft_<factor>``)."""
 
 DEFAULT_OSFT_TARGETS = ["*.q_proj", "*.k_proj", "*.v_proj", "*.o_proj", "*.gate_proj", "*.up_proj", "*.down_proj"]
 
@@ -115,7 +120,7 @@ class _OSFTReconstructLinear(torch.autograd.Function):
     def backward(ctx, grad_out):  # noqa: D102
         x, u_high, s_high, v_high, u_low, s_low, v_low = ctx.saved_tensors
         weight = _merge(u_high, s_high, v_high, u_low, s_low, v_low)
-        grad_x = grad_out @ weight
+        grad_x = grad_out @ weight if ctx.needs_input_grad[0] else None
         grad_w = grad_out.reshape(-1, grad_out.shape[-1]).t() @ x.reshape(-1, x.shape[-1])  # (N, M)
         a = grad_w @ v_low  # (N, r)
         grad_u_low = a * s_low
@@ -255,12 +260,7 @@ class OSFTLinear(nn.Module):
         ref = self.osft_U_high
         shape = (self.out_features, self.in_features)
         if isinstance(ref, DTensor):
-            return distribute_tensor(
-                torch.empty(shape, dtype=ref.dtype, device=ref.to_local().device),
-                ref.device_mesh,
-                ref.placements,
-                src_data_rank=None,
-            )
+            return dtensor_empty(shape, dtype=ref.dtype, device_mesh=ref.device_mesh, placements=ref.placements)
         return torch.empty(shape, dtype=ref.dtype, device=ref.device)
 
     @staticmethod
@@ -286,7 +286,7 @@ class OSFTLinear(nn.Module):
         elif dense is not None:
             self._base_weight = dense
         super()._load_from_state_dict(
-            state_dict, prefix, local_metadata, False, missing_keys, unexpected_keys, error_msgs
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
         if not has_factors:
             # Factors are produced by initialize_osft(); they are not expected in a base checkpoint.
@@ -317,7 +317,8 @@ def _is_dense_linear(module: nn.Module) -> bool:
 def apply_osft(model: nn.Module, config: OSFTConfig) -> int:
     """Replace the targeted ``nn.Linear`` modules with uninitialized :class:`OSFTLinear` modules.
 
-    Call on the meta-device model before sharding, like LoRA. Non-target parameters stay trainable.
+    Call before sharding, like LoRA: on a meta-device model the base weights arrive later through the
+    checkpoint load; on a materialized model they are carried over. Non-target parameters stay trainable.
 
     Returns:
         Number of replaced modules.
@@ -345,6 +346,13 @@ def apply_osft(model: nn.Module, config: OSFTConfig) -> int:
             device=weight.device,
             dtype=weight.dtype,
         )
+        if weight.device.type != "meta":
+            # Weights were loaded before the swap (e.g. ``weights_already_loaded``): keep them for
+            # initialize_osft instead of relying on a later checkpoint load.
+            new._base_weight = weight.detach()
+            if new.bias is not None:
+                with torch.no_grad():
+                    new.bias.copy_(bias)
         parent_name, _, child_name = name.rpartition(".")
         parent = model.get_submodule(parent_name) if parent_name else model
         setattr(parent, child_name, new)
@@ -397,11 +405,15 @@ def initialize_osft(model_parts: nn.Module | list[nn.Module]) -> int:
         return 0
     missing = [m for m in modules if m._base_weight is None]
     if missing:
-        raise RuntimeError(f"{len(missing)} OSFT modules have no base weight; was the base checkpoint loaded?")
+        raise RuntimeError(
+            f"{len(missing)} OSFT layers have no base weight to decompose. OSFT fine-tunes pretrained weights: "
+            "build the model with from_pretrained (load_base_model=True), not from_config."
+        )
     group = _process_group(modules[0])
     world = dist.get_world_size(group) if group is not None else 1
     rank = dist.get_rank(group) if group is not None else 0
     device = modules[0].osft_U_high.device if group is None else modules[0].osft_U_high.to_local().device
+    start_time = time.perf_counter()
     max_rel_err = 0.0
     for start in range(0, len(modules), world):
         batch = modules[start : start + world]
@@ -449,7 +461,12 @@ def initialize_osft(model_parts: nn.Module | list[nn.Module]) -> int:
         err = torch.tensor([max_rel_err], device=device)
         dist.all_reduce(err, op=dist.ReduceOp.MAX, group=group)
         max_rel_err = err.item()
-    logger.info("OSFT: decomposed %d weights (max relative SVD reconstruction error %.2e)", len(modules), max_rel_err)
+    logger.info(
+        "OSFT: decomposed %d weights in %.1fs (max relative SVD reconstruction error %.2e)",
+        len(modules),
+        time.perf_counter() - start_time,
+        max_rel_err,
+    )
     return len(modules)
 
 

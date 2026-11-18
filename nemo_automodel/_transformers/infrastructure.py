@@ -40,7 +40,7 @@ from nemo_automodel._transformers.v4_patches.kv_sharing import (
 )
 from nemo_automodel._transformers.v4_patches.rotary import fix_rotary_embeddings, should_fix_rotary_embeddings
 from nemo_automodel.components._peft.lora import apply_lora_to_linear_modules
-from nemo_automodel.components._peft.osft import OSFT_PARAM_PREFIX, apply_osft, initialize_osft
+from nemo_automodel.components._peft.osft import OSFT_KEY_MARKER, apply_osft, initialize_osft
 from nemo_automodel.components.checkpoint.checkpointing import (
     Checkpointer,
     CheckpointingConfig,
@@ -728,13 +728,14 @@ def apply_model_infrastructure(
             # The packed experts are filled by the base load through the state-dict adapter; only a ModelOpt
             # NVFP4 (16-column block) export has the layout the adapter maps onto them.
             _validate_nvfp4_checkpoint(pretrained_model_name_or_path, cache_dir)
+    if osft_config is not None:
+        _validate_osft_support(peft_config, quantization_config, fp8_config, qat_quantizer, mesh, autopipeline)
     peft_ctx = init_empty_weights() if is_meta_device else nullcontext()
     with peft_ctx:
         model = _apply_peft_and_lower_precision(
             model, mesh.tp_size, autopipeline, peft_config, quantization_config, fp8_config, qat_quantizer
         )
         if osft_config is not None:
-            _validate_osft_support(peft_config, quantization_config, fp8_config, qat_quantizer, mesh, autopipeline)
             apply_osft(model, osft_config)
 
     # Inject TE attention into HF models when requested.
@@ -815,7 +816,7 @@ def apply_model_infrastructure(
     # Rebind trainability after model surgery and before DDP/FSDP capture.
     if osft_config is not None:
         # HF exports carry the merged dense ``weight`` of each OSFT layer, never its factors.
-        pre_shard_hf_state_dict_keys = [k for k in pre_shard_hf_state_dict_keys if OSFT_PARAM_PREFIX not in k]
+        pre_shard_hf_state_dict_keys = [k for k in pre_shard_hf_state_dict_keys if OSFT_KEY_MARKER not in k]
 
     if isinstance(strategy_config, FSDP2Config) and peft_config is not None and quantization_config is None:
         prepare_frozen_parameters_for_sharding(
@@ -930,7 +931,8 @@ def apply_model_infrastructure(
     )
 
     if osft_config is not None:
-        initialize_osft(list(model.parts) if hasattr(model, "parts") else [getattr(model, "module", model)])
+        # Pipeline parallelism is rejected above, so there is a single model part (DDP-wrapped or not).
+        initialize_osft(getattr(model, "module", model))
 
     # Checkpoint loading can perform another round of parameter replacement, so
     # re-resolve once more on the final model parts before optimizer construction.
