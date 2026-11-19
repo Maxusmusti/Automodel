@@ -185,3 +185,19 @@ def test_missing_base_weight_explains_from_config():
     layer = OSFTLinear(32, 48, 24, bias=False)
     with pytest.raises(RuntimeError, match="from_pretrained"):
         initialize_osft(layer)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU autocast")
+def test_reconstruct_path_works_under_autocast():
+    """fp32 factors + bf16 autocast: backward must run under the forward's autocast state."""
+    torch.manual_seed(0)
+    weight = torch.randn(48, 32, device="cuda")
+    layer = OSFTLinear(32, 48, 24, bias=False, forward_mode="reconstruct", device="cuda", dtype=torch.float32)
+    layer._base_weight = weight.clone()
+    initialize_osft(layer)
+    x = torch.randn(4, 32, device="cuda", requires_grad=True)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        y = layer(x)
+    y.float().sum().backward()
+    assert y.dtype == torch.bfloat16
+    assert layer.osft_U_low.grad is not None and torch.isfinite(layer.osft_U_low.grad).all()

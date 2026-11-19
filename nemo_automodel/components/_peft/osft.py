@@ -107,16 +107,19 @@ class _OSFTReconstructLinear(torch.autograd.Function):
     """``y = x W_eff^T`` with ``W_eff`` rebuilt from the factors; gradients only for the low factors.
 
     The backward pass recomputes ``W_eff`` instead of saving it, forms ``dW`` once, and projects it onto
-    ``U_low``, ``S_low`` and ``V_low``. Saved activations are just ``x``, as for a plain linear layer.
+    ``U_low``, ``S_low`` and ``V_low``. Saved activations are just ``x``, as for a plain linear layer. Backward runs
+    under the forward's autocast state, so the layer also works with ``torch.autocast`` (not only FSDP2 casting).
     """
 
     @staticmethod
+    @torch.amp.custom_fwd(device_type="cuda")
     def forward(ctx, x, u_high, s_high, v_high, u_low, s_low, v_low):  # noqa: D102
         weight = _merge(u_high, s_high, v_high, u_low, s_low, v_low)
         ctx.save_for_backward(x, u_high, s_high, v_high, u_low, s_low, v_low)
         return F.linear(x, weight)
 
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_out):  # noqa: D102
         x, u_high, s_high, v_high, u_low, s_low, v_low = ctx.saved_tensors
         weight = _merge(u_high, s_high, v_high, u_low, s_low, v_low)
