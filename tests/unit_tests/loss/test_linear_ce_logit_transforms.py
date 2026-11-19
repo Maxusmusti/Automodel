@@ -57,3 +57,19 @@ def test_final_logit_softcapping_is_rejected():
             hidden_states=torch.randn(1, 3, 16),
             labels=torch.zeros(1, 3, dtype=torch.long),
         )
+
+
+def test_fused_softcapping_must_match_model():
+    """FusedLinearCrossEntropy applies softcapping itself, so it is accepted only with the model's value."""
+    from nemo_automodel.components.loss.linear_ce import FusedLinearCrossEntropy
+    from nemo_automodel.components.loss.utils import _apply_output_logit_scaling
+
+    model = _model(Gemma2Config(hidden_size=16, vocab_size=32, final_logit_softcapping=30.0))
+    hidden = torch.randn(1, 3, 16)
+    matching = FusedLinearCrossEntropy.__new__(FusedLinearCrossEntropy)
+    matching.logit_softcapping = 30.0
+    assert _apply_output_logit_scaling(matching, model, hidden) is hidden
+    missing = FusedLinearCrossEntropy.__new__(FusedLinearCrossEntropy)
+    missing.logit_softcapping = 0
+    with pytest.raises(ValueError, match="set loss_fn.logit_softcapping=30.0"):
+        _apply_output_logit_scaling(missing, model, hidden)

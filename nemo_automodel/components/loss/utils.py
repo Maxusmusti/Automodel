@@ -173,7 +173,8 @@ def _apply_output_logit_scaling(loss_fn: nn.Module, model: nn.Module, hidden_sta
 
     Linear-projection losses compute ``hidden_states @ lm_weight.T`` themselves, so any transform the model applies
     to its logits after ``lm_head`` must be reproduced here. Granite's ``logits_scaling`` divides the logits, which
-    equals dividing the hidden states. Transforms that cannot be folded into the projection are rejected.
+    equals dividing the hidden states. Final-logit softcapping must match the loss's own ``logit_softcapping`` (losses
+    without one reject it). Transforms that cannot be reproduced are rejected.
 
     Args:
         loss_fn: The linear-projection loss.
@@ -192,12 +193,25 @@ def _apply_output_logit_scaling(loss_fn: nn.Module, model: nn.Module, hidden_sta
         value = getattr(text_config, name, None)
         return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
-    softcapping, logit_scale = numeric("final_logit_softcapping"), numeric("logit_scale")
-    if softcapping is not None or (logit_scale is not None and logit_scale != 1.0):
-        name = "final_logit_softcapping" if softcapping is not None else "logit_scale"
+    logit_scale = numeric("logit_scale")
+    if logit_scale is not None and logit_scale != 1.0:
         raise ValueError(
-            f"{type(loss_fn).__name__} does not support {name}; use MaskedCrossEntropy to preserve the "
+            f"{type(loss_fn).__name__} does not support logit_scale; use MaskedCrossEntropy to preserve the "
             "model's post-projection logit transform"
+        )
+    model_softcap = numeric("final_logit_softcapping")
+    # Losses that implement softcapping themselves (FusedLinearCrossEntropy) must match the model's value.
+    loss_softcap = getattr(loss_fn, "logit_softcapping", None)
+    loss_softcap = float(loss_softcap) if isinstance(loss_softcap, (int, float)) and loss_softcap else None
+    if model_softcap != loss_softcap:
+        if not hasattr(loss_fn, "logit_softcapping"):
+            raise ValueError(
+                f"{type(loss_fn).__name__} does not support final_logit_softcapping; use MaskedCrossEntropy to "
+                "preserve the model's post-projection logit transform"
+            )
+        raise ValueError(
+            f"{type(loss_fn).__name__}.logit_softcapping={loss_softcap or 0} does not match the model's "
+            f"final_logit_softcapping={model_softcap}; set loss_fn.logit_softcapping={model_softcap or 0}"
         )
     scaling = numeric("logits_scaling")
     if scaling is None or scaling == 1.0:
