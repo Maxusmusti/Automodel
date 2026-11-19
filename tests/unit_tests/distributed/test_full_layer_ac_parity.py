@@ -26,8 +26,11 @@ from nemo_automodel.components.distributed.activation_checkpointing import (
     apply_full_layer_checkpointing_to_layers,
     apply_submodule_checkpointing,
 )
+from nemo_automodel.components.models.baichuan.configuration import BaichuanConfig
+from nemo_automodel.components.models.baichuan.model import BaichuanForCausalLM
 from nemo_automodel.components.models.common import BackendConfig
 from nemo_automodel.components.models.llama.model import LlamaForCausalLM
+from nemo_automodel.components.models.mistral3.model import Ministral3Config, Ministral3ForCausalLM
 from nemo_automodel.components.models.qwen2.model import Qwen2ForCausalLM
 from nemo_automodel.components.models.qwen3.model import Qwen3ForCausalLM
 
@@ -39,18 +42,39 @@ _TINY = dict(
     num_attention_heads=4,
     num_key_value_heads=2,
 )
+_BACKEND = dict(attn="sdpa", linear="torch", rms_norm="torch_fp32")
+# Baichuan's causal-mask construction does not support float64; CPU recompute is deterministic in fp32 too.
+_FP32_ONLY = {"baichuan"}
+
+
+def _with_attn(config, impl="sdpa"):
+    config._attn_implementation = impl
+    return config
+
+
 _MODELS = {
-    "llama": (LlamaForCausalLM, LlamaConfig(**_TINY, head_dim=8)),
-    "qwen2": (Qwen2ForCausalLM, Qwen2Config(**_TINY)),
-    "qwen3": (Qwen3ForCausalLM, Qwen3Config(**_TINY, head_dim=8)),
+    "llama": (LlamaForCausalLM, lambda: _with_attn(LlamaConfig(**_TINY, head_dim=8)), True),
+    "qwen2": (Qwen2ForCausalLM, lambda: _with_attn(Qwen2Config(**_TINY)), True),
+    "qwen3": (Qwen3ForCausalLM, lambda: _with_attn(Qwen3Config(**_TINY, head_dim=8)), True),
+    "baichuan": (
+        BaichuanForCausalLM,
+        lambda: BaichuanConfig(**{k: v for k, v in _TINY.items() if k != "num_key_value_heads"}),
+        False,
+    ),
+    "ministral3": (
+        Ministral3ForCausalLM,
+        lambda: _with_attn(Ministral3Config(**_TINY, head_dim=8, max_position_embeddings=64), "eager"),
+        False,
+    ),
 }
 
 
 def _build(name: str, ac: str | None) -> torch.nn.Module:
-    model_cls, config = _MODELS[name]
-    config._attn_implementation = "sdpa"
+    model_cls, make_config, takes_backend = _MODELS[name]
     torch.manual_seed(0)
-    model = model_cls(config, backend=BackendConfig(attn="sdpa", linear="torch", rms_norm="torch_fp32")).double()
+    kwargs = {"backend": BackendConfig(**_BACKEND)} if takes_backend else {}
+    model = model_cls(make_config(), **kwargs)
+    model = model.float() if name in _FP32_ONLY else model.double()
     layers = list(model.model.layers)
     if ac == "full_layer":
         apply_full_layer_checkpointing_to_layers(model, layers)
@@ -83,7 +107,8 @@ def test_full_layer_checkpointing_matches_submodule_and_no_checkpointing(name):
     ref_loss, ref_grads = _loss_and_grads(_build(name, None))
     for ac in ("submodule", "full_layer"):
         loss, grads = _loss_and_grads(_build(name, ac))
-        torch.testing.assert_close(loss, ref_loss, rtol=1e-12, atol=1e-12)
+        tol = 1e-6 if name in _FP32_ONLY else 1e-12
+        torch.testing.assert_close(loss, ref_loss, rtol=tol, atol=tol)
         assert grads.keys() == ref_grads.keys(), f"{ac}: gradient set differs"
         for key, grad in grads.items():
-            torch.testing.assert_close(grad, ref_grads[key], rtol=1e-10, atol=1e-12, msg=f"{ac}: {key}")
+            torch.testing.assert_close(grad, ref_grads[key], rtol=tol * 100, atol=tol, msg=f"{ac}: {key}")

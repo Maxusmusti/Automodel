@@ -173,7 +173,9 @@ def test_qwen3_vl_moe_does_not_declare_cp_vision_frame_sharding_support():
     assert caps.supports_cp_vision_frame_sharding is False
 
 
-@pytest.mark.parametrize("arch", ["LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"])
+@pytest.mark.parametrize(
+    "arch", ["BaichuanForCausalLM", "LlamaForCausalLM", "Ministral3ForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"]
+)
 def test_dense_models_declare_full_layer_activation_checkpointing(arch):
     """Dense decoders with side-effect-free layers opt into whole-layer activation checkpointing."""
     caps = query_capabilities(ModelRegistry.get_model_cls_from_model_arch(arch))

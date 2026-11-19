@@ -491,6 +491,8 @@ class BaichuanForCausalLM(HFCheckpointingMixin, BaichuanPreTrainedModel, Generat
         supports_cp: bool = False
         supports_pp: bool = False
         supports_ep: bool = False
+        # Decoder layers only write idempotent rotary caches, so whole-layer replay is exact.
+        supports_full_layer_activation_checkpointing: bool = True
 
     def __init__(self, config: BaichuanConfig, **model_kwargs):
         warn_deprecated_model_class("BaichuanForCausalLM")
