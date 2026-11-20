@@ -1040,6 +1040,9 @@ navigation:
       - page: "SFT & PEFT"
         path: ../../guides/llm/finetune.mdx
         slug: sft-peft
+      - page: "Orthogonal Subspace Fine-Tuning (OSFT)"
+        path: ../../guides/llm/osft.mdx
+        slug: osft
       - page: "Pretraining"
         path: ../../guides/llm/pretraining.mdx
         slug: pretraining

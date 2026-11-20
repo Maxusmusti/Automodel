@@ -3499,3 +3499,14 @@ class TestExtractModelLayers:
         assert len(result) == 5
         assert [id(r) for r in result[:2]] == [id(layer) for layer in language_layers]
         assert [id(r) for r in result[2:]] == [id(layer) for layer in vision_layers]
+
+
+@pytest.mark.parametrize("declared", [True, False, None])
+def test_base_parallelizer_full_layer_checkpointing_follows_model_capability(declared):
+    """The base hook defers to the model's ``supports_full_layer_activation_checkpointing`` capability."""
+    from nemo_automodel.components.distributed.parallelizer import ModelParallelizer
+
+    model = nn.Linear(2, 2)
+    if declared is not None:
+        model.supports_full_layer_activation_checkpointing = declared
+    assert ModelParallelizer()._use_full_layer_activation_checkpointing(model) is bool(declared)

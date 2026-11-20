@@ -1,0 +1,94 @@
+---
+title: "Orthogonal Subspace Fine-Tuning (OSFT)"
+description: "Continual-learning fine-tuning in NeMo AutoModel that freezes each weight's dominant singular directions and trains only the orthogonal complement."
+position: 3
+---
+
+Orthogonal Subspace Fine-Tuning (OSFT) adapts a model to a new task while protecting what it already knows. For
+each targeted weight `W`, OSFT computes an SVD once, freezes the top singular directions, and trains only the
+remaining low-rank factors. Every update stays orthogonal to the frozen subspace, so new learning does not
+overwrite the dominant directions that encode prior knowledge. No replay data, adapters, or per-task parameters
+are needed: the exported checkpoint is a plain dense model.
+
+OSFT is described in Nayak et al., "Sculpting Subspaces: Constrained Full Fine-Tuning in LLMs for Continual
+Learning" (ICLR 2026).
+
+## How It Works
+
+For each target matrix `W` (shape `N x M`), with `k = floor(min(N, M) * (1 - unfreeze_rank_ratio))`:
+
+```text
+W = U S V^T                       (fp32 SVD, once, after the base checkpoint loads)
+U_high, S_high, V_high            top-k singular triplets      -> frozen
+U_low,  S_low,  V_low             remaining triplets           -> trainable
+W_eff = U_high S_high V_high^T + U_low S_low V_low^T
+```
+
+Each optimizer step projects the trainable factors' gradients onto the orthogonal complement of the frozen
+subspaces, and projects the factors themselves again after the step. The second projection matters: AdamW's
+per-element scaling would otherwise rotate updates back into the frozen subspace.
+
+Non-target parameters (embeddings, norms, the output head) remain trainable, as in full fine-tuning.
+
+## Enable OSFT
+
+Add an `osft` section to a fine-tuning recipe:
+
+```yaml
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: Qwen/Qwen3-8B
+  torch_dtype: float32  # fp32 master weights and optimizer state; compute runs in bf16 under FSDP2
+
+osft:
+  _target_: nemo_automodel.components._peft.osft.OSFTConfig
+  unfreeze_rank_ratio: 0.25
+  target_modules: ["*.q_proj", "*.k_proj", "*.v_proj", "*.o_proj", "*.gate_proj", "*.up_proj", "*.down_proj"]
+```
+
+A complete recipe is available at `examples/llm_finetune/qwen/qwen3_8b_squad_osft.yaml`:
+
+```bash
+automodel examples/llm_finetune/qwen/qwen3_8b_squad_osft.yaml --nproc-per-node 8
+```
+
+### Options
+
+| Field | Default | Description |
+|---|---|---|
+| `unfreeze_rank_ratio` | `0.25` | Fraction of each matrix's singular directions (the smallest) that stays trainable. Larger values learn more and protect less. |
+| `target_modules` | q/k/v/o and gate/up/down projections | Wildcard patterns of dense linear layers to decompose. Models with fused projections need their own names, for example `["*.qkv_proj", "*.o_proj", "*.gate_up_proj", "*.down_proj"]` for Phi-3/Phi-4. |
+| `exclude_modules` | `[]` | Wildcard patterns to exclude. Mutually exclusive with `target_modules`. |
+| `forward_mode` | `auto` | `reconstruct` materializes `W_eff` and runs one dense GEMM; `factored` multiplies through the factors. `auto` picks the cheaper one per layer and per call from the layer shape and token count. |
+| `project_gradients_before_clipping` | `true` | Project gradients before gradient-norm clipping, so the clipped norm is the norm of the update actually applied. |
+
+<Note>
+`unfreeze_rank_ratio` counts singular directions, not parameters. The trainable factors `U_low`, `S_low`,
+and `V_low` hold `(N + M) * r + r` values for `r` unfrozen directions. With `0.25`, this is 30-50% of the targets'
+parameter count depending on matrix shapes (50% for square matrices, 36% overall for Qwen3-8B).
+</Note>
+
+## Checkpoints
+
+- **Resumable checkpoints** store the OSFT factors (`*.osft_*` keys) next to the merged dense weights. Resuming
+  restores the factors exactly, together with the optimizer state.
+- **Consolidated Hugging Face exports** (`checkpoint.save_consolidated: true`) contain only the merged dense
+  weights under the original parameter names. They load directly with Transformers, vLLM, or another round of
+  OSFT for the next task.
+
+## Memory and Throughput
+
+OSFT stores two sets of factors per target in place of the dense weight. Optimizer state is kept only for the
+trainable low-rank factors. Compared with full fine-tuning of the same model:
+
+- Model and optimizer state per GPU is lower at `unfreeze_rank_ratio` up to roughly 0.5.
+  On Qwen3-8B across 8 GPUs, it is 9.5 GB at 0.25 and 12.0 GB at 0.5, against 12.4 GB for full fine-tuning.
+- The SVDs run once at startup, distributed across ranks. On 8x H100 this takes about 50 seconds for Qwen3-8B.
+- Step time is roughly 1.2x that of full fine-tuning on Qwen3-8B (16k tokens per GPU). Most of the extra time
+  is the factor GEMMs; the projections take about 0.25 seconds per step.
+
+## Limitations
+
+OSFT currently supports FSDP2 (and single-device) data parallelism. It raises an error when combined with PEFT,
+quantization, FP8, QAT, or tensor, pipeline, or expert parallelism. Target modules must be dense linear layers
+(`torch.nn.Linear` or Transformer Engine `Linear`).

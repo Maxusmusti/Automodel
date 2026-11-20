@@ -141,6 +141,19 @@ class _VisionShardingModel(nn.Module):
     ModelCapabilities = _VisionShardingCapabilities
 
 
+@dataclass(frozen=True)
+class _FullLayerACCapabilities:
+    supports_tp: bool = False
+    supports_cp: bool = False
+    supports_pp: bool = False
+    supports_ep: bool = False
+    supports_full_layer_activation_checkpointing: bool = True
+
+
+class _FullLayerACModel(nn.Module):
+    ModelCapabilities = _FullLayerACCapabilities
+
+
 def _mesh(tp=1, pp=1, cp=1, ep=1):
     return SimpleNamespace(tp_size=tp, pp_size=pp, cp_size=cp, ep_size=ep)
 
@@ -289,6 +302,22 @@ class TestModelSupportsCpVisionFrameSharding:
 
         assert model.supports.supports_cp_vision_frame_sharding is False
         assert model.supports_cp_vision_frame_sharding is False
+
+
+class TestModelSupportsFullLayerActivationCheckpointing:
+    def test_declared_capability_is_exposed(self):
+        model = _FullLayerACModel()
+        _attach(model)
+
+        assert model.supports.supports_full_layer_activation_checkpointing is True
+        assert model.supports_full_layer_activation_checkpointing is True
+
+    def test_undeclared_capability_defaults_false(self):
+        model = _Bare()
+        _attach(model)
+
+        assert model.supports.supports_full_layer_activation_checkpointing is False
+        assert model.supports_full_layer_activation_checkpointing is False
 
 
 class TestModelSupportsPP:

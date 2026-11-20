@@ -173,6 +173,23 @@ def test_qwen3_vl_moe_does_not_declare_cp_vision_frame_sharding_support():
     assert caps.supports_cp_vision_frame_sharding is False
 
 
+@pytest.mark.parametrize(
+    "arch", ["BaichuanForCausalLM", "LlamaForCausalLM", "Ministral3ForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"]
+)
+def test_dense_models_declare_full_layer_activation_checkpointing(arch):
+    """Dense decoders with side-effect-free layers opt into whole-layer activation checkpointing."""
+    caps = query_capabilities(ModelRegistry.get_model_cls_from_model_arch(arch))
+
+    assert caps.supports_full_layer_activation_checkpointing is True
+
+
+def test_full_layer_activation_checkpointing_is_opt_in():
+    """Models that did not opt in keep submodule checkpointing (e.g. MoE with router state)."""
+    caps = query_capabilities(ModelRegistry.get_model_cls_from_model_arch("Qwen3MoeForCausalLM"))
+
+    assert caps.supports_full_layer_activation_checkpointing is False
+
+
 # ---------------------------------------------------------------------------
 # 3. query_capabilities canonical-type & dispatch behavior
 # ---------------------------------------------------------------------------

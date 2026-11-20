@@ -2226,7 +2226,9 @@ fi
         for fqn in additional_keys:
             if fqn not in excluded_keys:
                 fqn_to_file_index_mapping[fqn] = fqn_to_file_index_mapping.get(fqn, default_index)
-        return fqn_to_file_index_mapping
+        # OSFT factors (``*.osft_*``, see _peft.osft.OSFT_KEY_MARKER) stay in the resumable checkpoint only;
+        # the HF export carries each OSFT layer's merged dense ``weight`` instead.
+        return {fqn: idx for fqn, idx in fqn_to_file_index_mapping.items() if ".osft_" not in fqn}
 
     def _maybe_build_original_dtype_mapping(
         self, model_state: ModelState, state_dict: dict[str, torch.Tensor]

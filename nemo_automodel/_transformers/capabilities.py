@@ -348,6 +348,15 @@ class ModelSupports:
         return capabilities.supports_cp_vision_frame_sharding
 
     @property
+    def supports_full_layer_activation_checkpointing(self) -> bool:
+        """Model declares side-effect-free decoder layers that whole-layer checkpointing may replay."""
+        try:
+            capabilities = query_capabilities(self._model)
+        except AttributeError:
+            return False
+        return capabilities.supports_full_layer_activation_checkpointing
+
+    @property
     def supports_generate(self) -> bool:
         """Model has a ``generate()`` method for autoregressive inference."""
         return callable(getattr(self._model, "generate", None))

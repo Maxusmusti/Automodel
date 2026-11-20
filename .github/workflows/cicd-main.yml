@@ -557,7 +557,7 @@ jobs:
             runner: ${{ needs.pre-flight.outputs.runner_prefix }}
             test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}
           - test-name: L2_HF_PEFT
-            test-folder: hf_peft
+            test-folder: hf_peft,osft
             timeout: 30
             runner: ${{ needs.pre-flight.outputs.runner_prefix }}
             test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}
@@ -668,7 +668,7 @@ jobs:
             # plain (non-IMEX) pool. See nemo-ci-gcp-gpu-x2-imex in TF-States.
             runner: nemo-ci-gcp-gpu-x2-imex
           - test-name: L2_HF_PEFT
-            test-folder: hf_peft
+            test-folder: hf_peft,osft
             timeout: 30
             is-optional: "true"
           # Merged with hf_transformer_llm + data, mirroring cicd-e2e-tests
