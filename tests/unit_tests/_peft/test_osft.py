@@ -138,6 +138,22 @@ def test_state_dict_base_load_then_merged_export():
     torch.testing.assert_close(exported["bias"], base.bias.detach())
 
 
+def test_base_load_ignores_echoed_own_factors():
+    """A full-state-dict loader passes the layer's own (undecomposed) factor tensors back with the base weight.
+
+    Regression test: those echoes used to be read as a resume, which discarded the base weight and skipped the
+    SVD, so training started from uninitialized factors (loss at random-init level).
+    """
+    base = nn.Linear(32, 48, bias=True).double()
+    layer = OSFTLinear(32, 48, OSFTConfig().rank_high(48, 32), bias=True, dtype=torch.float64)
+    echoed = {k: v for k, v in layer.state_dict(keep_vars=True).items() if ".osft_" in "." + k or k.startswith("osft_")}
+    assert echoed, "no factor keys to echo"
+    layer.load_state_dict({**base.state_dict(), **echoed}, strict=False)
+    assert not layer._osft_initialized and layer.weight is not None
+    initialize_osft(layer)
+    torch.testing.assert_close(layer.state_dict()["weight"], base.weight.detach(), rtol=1e-10, atol=1e-10)
+
+
 def test_state_dict_with_factors_resumes_exactly():
     src, _ = _make_layer(bias=True)
     with torch.no_grad():
@@ -201,3 +217,29 @@ def test_reconstruct_path_works_under_autocast():
     y.float().sum().backward()
     assert y.dtype == torch.bfloat16
     assert layer.osft_U_low.grad is not None and torch.isfinite(layer.osft_U_low.grad).all()
+
+
+@pytest.mark.run_only_on("GPU")
+@pytest.mark.parametrize("mode", ["reconstruct", "factored"])
+def test_backward_is_bitwise_deterministic_on_cuda_bf16(mode):
+    """Two identical backward passes give bit-identical factor gradients (CUDA, bf16 training dtype).
+
+    A random upstream gradient is used because an all-ones gradient (``out.sum().backward()``) makes every
+    reduction order produce exactly representable sums, hiding non-deterministic accumulation.
+    """
+
+    def grads():
+        layer, _ = _make_layer(1536, 512, urr=0.25, mode=mode, bias=True, seed=3)
+        layer = layer.to(device="cuda", dtype=torch.bfloat16)
+        gen = torch.Generator(device="cuda").manual_seed(7)
+        x = torch.randn(4, 1024, 512, device="cuda", dtype=torch.bfloat16, generator=gen, requires_grad=True)
+        out = layer(x)
+        out.backward(torch.randn(out.shape, device="cuda", dtype=out.dtype, generator=gen))
+        result = {n: p.grad.clone() for n, p in layer.named_parameters() if p.grad is not None}
+        result["input"] = x.grad.clone()
+        return result
+
+    first, second = grads(), grads()
+    assert first.keys() == second.keys() and {"osft_U_low", "osft_S_low", "osft_V_low", "input"} <= first.keys()
+    for name in first:
+        assert torch.equal(first[name], second[name]), f"{mode}: {name} gradient differs between identical runs"

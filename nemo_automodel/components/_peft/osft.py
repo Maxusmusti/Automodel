@@ -282,7 +282,18 @@ class OSFTLinear(nn.Module):
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ) -> None:
         dense = state_dict.pop(prefix + "weight", None)
-        has_factors = any(k.startswith(prefix + OSFT_PARAM_PREFIX) for k in state_dict)
+        factor_keys = [k for k in state_dict if k.startswith(prefix + OSFT_PARAM_PREFIX)]
+        if not self._osft_initialized:
+            # Full-state-dict loaders (e.g. ``set_model_state_dict`` with a base HF checkpoint) fill the model's
+            # own state dict and pass every key back, so the factor entries can be this layer's own, still
+            # undecomposed parameters. Those carry no checkpoint data: drop them so the dense base weight is kept
+            # for ``initialize_osft`` instead of being mistaken for a resume.
+            for key in factor_keys:
+                own = getattr(self, key[len(prefix) :], None)
+                if own is not None and _same_storage(state_dict[key], own):
+                    del state_dict[key]
+            factor_keys = [k for k in factor_keys if k in state_dict]
+        has_factors = bool(factor_keys)
         if has_factors:
             self._osft_initialized = True
             self._base_weight = None
@@ -294,6 +305,17 @@ class OSFTLinear(nn.Module):
         if not has_factors:
             # Factors are produced by initialize_osft(); they are not expected in a base checkpoint.
             missing_keys[:] = [k for k in missing_keys if not k.startswith(prefix + OSFT_PARAM_PREFIX)]
+
+
+def _same_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether two tensors (or the local shards of two DTensors) alias the same memory."""
+    a = a.to_local() if isinstance(a, DTensor) else a
+    b = b.to_local() if isinstance(b, DTensor) else b
+    if a.device != b.device:
+        return False
+    if a.is_meta:
+        return b.is_meta  # meta tensors hold no data, so a meta "checkpoint" value can only be the placeholder
+    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
 
 
 def _iter_osft_modules(modules: Iterable[nn.Module]) -> Iterator[tuple[str, OSFTLinear]]:
