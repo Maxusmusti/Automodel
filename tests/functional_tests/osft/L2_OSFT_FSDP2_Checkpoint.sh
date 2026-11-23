@@ -16,6 +16,9 @@ set -xeuo pipefail # Exit immediately if a command exits with a non-zero status
 
 export PYTHONPATH=${PYTHONPATH:-}:$(pwd)
 export CUDA_VISIBLE_DEVICES="0,1"
+# Deterministic kernels, so the resumed run's next update can be compared bitwise with the uninterrupted run.
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+export FLASH_ATTENTION_DETERMINISTIC=1
 
 PYTEST_S_FLAG=""
 if [ "${PYTEST_PROPAGATE_S:-}" = "1" ]; then
