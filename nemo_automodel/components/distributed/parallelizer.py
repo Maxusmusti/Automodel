@@ -304,8 +304,12 @@ class ModelParallelizer:
         validate_tp_mesh(model, tp_mesh)
 
     def _use_full_layer_activation_checkpointing(self, model: nn.Module) -> bool:
-        """Return whether this model safely opts into whole-layer checkpointing."""
-        return False
+        """Return whether this model safely opts into whole-layer checkpointing.
+
+        Models opt in through the ``supports_full_layer_activation_checkpointing`` capability, which
+        ``attach_capabilities_and_validate`` forwards onto the model; parallelizer subclasses may override.
+        """
+        return getattr(model, "supports_full_layer_activation_checkpointing", False) is True
 
     def _apply(
         self,

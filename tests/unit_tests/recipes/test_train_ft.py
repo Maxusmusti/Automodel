@@ -4580,3 +4580,58 @@ def test_neat_flash_pp_rebuilds_offsets_for_each_microbatch(document_ids: list[l
     recipe._forward_backward_step(0, batch, loss_buffer=[], num_label_tokens=8, num_batches=1)
     assert len(seen) == 2
     assert set(batch) == original_keys
+
+
+class TestRunTrainOptimStepOSFTProjection:
+    """OSFT projections run at the right points of the optimizer step."""
+
+    @pytest.mark.parametrize(
+        ("before_clip", "expected"),
+        [
+            (True, ["project_gradients", "clip", "step", "zero_grad", "project_parameters"]),
+            (False, ["clip", "project_gradients", "step", "zero_grad", "project_parameters"]),
+        ],
+    )
+    def test_projection_order(self, monkeypatch, before_clip, expected):
+        from nemo_automodel.components._peft.osft import OSFTConfig
+
+        recipe = TestRunTrainOptimStepSetsMoEScale._make_recipe(self, monkeypatch, pp_enabled=False)
+        calls = []
+
+        def clip(*args, **kwargs):
+            calls.append("clip")
+            return torch.tensor(1.0)
+
+        monkeypatch.setattr("nemo_automodel.recipes.llm.train_ft.clip_grads_for_optimizers", clip)
+        object.__setattr__(
+            recipe,
+            "optimizer",
+            [
+                SimpleNamespace(
+                    step=lambda: calls.append("step"),
+                    zero_grad=lambda: calls.append("zero_grad"),
+                    param_groups=[{"lr": 0.01}],
+                )
+            ],
+        )
+        object.__setattr__(recipe, "osft_config", OSFTConfig(project_gradients_before_clipping=before_clip))
+        object.__setattr__(
+            recipe,
+            "osft_projector",
+            SimpleNamespace(
+                project_gradients=lambda: calls.append("project_gradients"),
+                project_parameters=lambda: calls.append("project_parameters"),
+            ),
+        )
+
+        recipe._run_train_optim_step([{"input_ids": torch.tensor([[1, 2, 3]]), "labels": torch.tensor([[1, 2, 3]])}])
+
+        assert calls == expected
+
+    def test_no_projection_without_osft(self, monkeypatch):
+        recipe = TestRunTrainOptimStepSetsMoEScale._make_recipe(self, monkeypatch, pp_enabled=False)
+        object.__setattr__(recipe, "osft_projector", None)
+        sample = recipe._run_train_optim_step(
+            [{"input_ids": torch.tensor([[1, 2, 3]]), "labels": torch.tensor([[1, 2, 3]])}]
+        )
+        assert sample.metrics["grad_norm"] == 1.0

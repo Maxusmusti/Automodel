@@ -57,6 +57,9 @@ class ModelCapabilities:
         supports_thd: THD packed-sequence inputs.
         supports_mtp_cp: MTP training with context parallelism.
         supports_mtp_cp_pp: MTP training with context and pipeline parallelism.
+        supports_full_layer_activation_checkpointing: Decoder layers are side-effect free given their
+            inputs, so activation checkpointing may replay each whole layer instead of wrapping
+            attention, MLP and norms separately (one saved activation per layer instead of several).
         supports_cp_vision_frame_sharding: Frame-level vision-tower sharding over
             context-parallel ranks.
     """
@@ -69,6 +72,7 @@ class ModelCapabilities:
     supports_mtp_cp: bool = False
     supports_mtp_cp_pp: bool = False
     supports_cp_vision_frame_sharding: bool = False
+    supports_full_layer_activation_checkpointing: bool = False
 
 
 def _to_canonical(caps_obj) -> ModelCapabilities:
@@ -89,6 +93,9 @@ def _to_canonical(caps_obj) -> ModelCapabilities:
         supports_mtp_cp=bool(getattr(caps_obj, "supports_mtp_cp", False)),
         supports_mtp_cp_pp=bool(getattr(caps_obj, "supports_mtp_cp_pp", False)),
         supports_cp_vision_frame_sharding=bool(getattr(caps_obj, "supports_cp_vision_frame_sharding", False)),
+        supports_full_layer_activation_checkpointing=bool(
+            getattr(caps_obj, "supports_full_layer_activation_checkpointing", False)
+        ),
     )
 
 

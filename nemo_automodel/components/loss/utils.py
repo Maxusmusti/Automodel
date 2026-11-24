@@ -168,6 +168,57 @@ def prepare_lm_weight(
     return loss_fn.materialize_lm_weight(_get_lm_head_weight(model), grad_reduce_group=grad_reduce_group)
 
 
+def _apply_output_logit_scaling(loss_fn: nn.Module, model: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Fold the model's post-projection logit transform into the hidden states fed to a linear-projection loss.
+
+    Linear-projection losses compute ``hidden_states @ lm_weight.T`` themselves, so any transform the model applies
+    to its logits after ``lm_head`` must be reproduced here. Granite's ``logits_scaling`` divides the logits, which
+    equals dividing the hidden states. Final-logit softcapping must match the loss's own ``logit_softcapping`` (losses
+    without one reject it). Transforms that cannot be reproduced are rejected.
+
+    Args:
+        loss_fn: The linear-projection loss.
+        model: Owning model; its (text) config declares the output transform.
+        hidden_states: Final hidden states of shape ``[batch, sequence, hidden]``.
+
+    Returns:
+        ``hidden_states``, divided by ``logits_scaling`` when the model declares one.
+    """
+    config = getattr(model, "config", None)
+    if config is None:
+        return hidden_states
+    text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+
+    def numeric(name: str) -> float | None:
+        value = getattr(text_config, name, None)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    logit_scale = numeric("logit_scale")
+    if logit_scale is not None and logit_scale != 1.0:
+        raise ValueError(
+            f"{type(loss_fn).__name__} does not support logit_scale; use MaskedCrossEntropy to preserve the "
+            "model's post-projection logit transform"
+        )
+    model_softcap = numeric("final_logit_softcapping")
+    # Losses that implement softcapping themselves (FusedLinearCrossEntropy) must match the model's value.
+    loss_softcap = getattr(loss_fn, "logit_softcapping", None)
+    loss_softcap = float(loss_softcap) if isinstance(loss_softcap, (int, float)) and loss_softcap else None
+    if model_softcap != loss_softcap:
+        if not hasattr(loss_fn, "logit_softcapping"):
+            raise ValueError(
+                f"{type(loss_fn).__name__} does not support final_logit_softcapping; use MaskedCrossEntropy to "
+                "preserve the model's post-projection logit transform"
+            )
+        raise ValueError(
+            f"{type(loss_fn).__name__}.logit_softcapping={loss_softcap or 0} does not match the model's "
+            f"final_logit_softcapping={model_softcap}; set loss_fn.logit_softcapping={model_softcap or 0}"
+        )
+    scaling = numeric("logits_scaling")
+    if scaling is None or scaling == 1.0:
+        return hidden_states
+    return hidden_states / scaling
+
+
 def calculate_loss(loss_fn: nn.Module, **kwargs: Any) -> torch.Tensor:
     """Calculate a logits-based or linear-projection cross-entropy loss.
 
@@ -206,7 +257,7 @@ def calculate_loss(loss_fn: nn.Module, **kwargs: Any) -> torch.Tensor:
             )
         loss_fn_kwargs.update(
             {
-                "hidden_states": kwargs.pop("hidden_states"),
+                "hidden_states": _apply_output_logit_scaling(loss_fn, model, kwargs.pop("hidden_states")),
                 "labels": labels,
                 "lm_weight": lm_head,
                 "grad_reduce_group": kwargs.pop("grad_reduce_group", None),

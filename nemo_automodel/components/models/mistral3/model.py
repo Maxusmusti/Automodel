@@ -526,6 +526,8 @@ class Ministral3ForCausalLM(HFCheckpointingMixin, Ministral3PreTrainedModel, Gen
         supports_cp: bool = False
         supports_pp: bool = True
         supports_ep: bool = False
+        # Decoder layers only write state through past_key_values, which training never passes.
+        supports_full_layer_activation_checkpointing: bool = True
 
     def __init__(self, config: Ministral3Config):
         quantization_config = getattr(config, "quantization_config", None)

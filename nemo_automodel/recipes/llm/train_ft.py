@@ -61,6 +61,7 @@ from nemo_automodel._transformers.infrastructure import (
     instantiate_infrastructure,
 )
 from nemo_automodel._transformers.utils import apply_cache_compatibility_patches
+from nemo_automodel.components._peft.osft import OSFTConfig, OSFTProjector
 from nemo_automodel.components.config._arg_parser import parse_args_and_load_config
 from nemo_automodel.components.config.loader import ConfigNode
 from nemo_automodel.components.cuda_graphs import PartialCudaGraphManager
@@ -263,6 +264,7 @@ def build_model(
     device_mesh=None,
     *,
     load_metadata_with_gloo: bool = False,
+    osft_config: OSFTConfig | None = None,
 ) -> tuple[nn.Module | AutoPipeline, list["Optimizer"]]:  # noqa: F821
     """Build and initialize a model.
 
@@ -283,6 +285,7 @@ def build_model(
             auto-select based on CP / activation checkpointing.
         load_metadata_with_gloo: Use Gloo for pretrained checkpoint load planning.
         device_mesh: Pre-created device mesh forwarded when ``distributed_setup`` is not provided.
+        osft_config: Optional OSFT configuration (Orthogonal Subspace Fine-Tuning).
     """
     with ScopedRNG(seed=seed, ranked=True):
         kwargs = {
@@ -293,6 +296,7 @@ def build_model(
             "freeze_config": cfg_freeze.to_dict() if isinstance(cfg_freeze, ConfigNode) else cfg_freeze,
             "sdpa_method": sdpa_method,
             "load_metadata_with_gloo": load_metadata_with_gloo,
+            "osft_config": osft_config,
         }
         if distributed_setup is not None:
             kwargs["distributed_setup"] = distributed_setup
@@ -374,6 +378,7 @@ def build_model(
                 compile_config=kwargs.get("compile_config"),
                 quantization_config=kwargs.get("quantization_config"),
                 freeze_config=kwargs.get("freeze_config"),
+                osft_config=kwargs.get("osft_config"),
                 pretrained_model_name_or_path=None,
                 load_base_model=False,
                 load_metadata_with_gloo=load_metadata_with_gloo,
@@ -679,6 +684,9 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
         self.peft_config = None
         if self.cfg.get("peft", None) is not None:
             self.peft_config = self.cfg.peft.instantiate()
+        self.osft_config = None
+        if self.cfg.get("osft", None) is not None:
+            self.osft_config = self.cfg.osft.instantiate()
 
         # Checkpoint config (model-derived fields are filled in by RecipeConfig)
         checkpoint_config = self.cfg.checkpoint
@@ -717,7 +725,11 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
             cfg_freeze=self.cfg.get("freeze_config", None),
             sdpa_method=self.cfg.get("sdpa_method", None),
             load_metadata_with_gloo=checkpoint_config.load_metadata_with_gloo,
+            osft_config=self.osft_config,
         )
+        self.osft_projector = None
+        if self.osft_config is not None:
+            self.osft_projector = OSFTProjector(model.parts if isinstance(model, AutoPipeline) else model)
         self.embedding_row_repair_report = None
         embedding_row_repair = self.cfg.embedding_row_repair
         if embedding_row_repair is not None and embedding_row_repair.enabled:
@@ -1621,6 +1633,10 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
                 prepare_after_first_microbatch()
 
         synchronize_tp_replica_gradients(self.model_parts, self.device_mesh)
+        osft_projector = getattr(self, "osft_projector", None)
+        project_before_clip = osft_projector is not None and self.osft_config.project_gradients_before_clipping
+        if project_before_clip:
+            osft_projector.project_gradients()
         grad_norm = clip_grads_for_optimizers(
             self.optimizer,
             max_grad_norm,
@@ -1643,9 +1659,13 @@ class TrainFinetuneRecipeForNextTokenPrediction(BaseRecipe):
         # self.model_parts[0].finish_grad_sync()
 
         self.checkpointer.maybe_wait_for_staging()
+        if osft_projector is not None and not project_before_clip:
+            osft_projector.project_gradients()
         for opt in self.optimizer:
             opt.step()
             opt.zero_grad()
+        if osft_projector is not None:
+            osft_projector.project_parameters()
 
         if hasattr(self.model_parts[0], "update_moe_gate_bias"):
             for mp in self.model_parts:

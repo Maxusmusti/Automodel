@@ -435,6 +435,40 @@ def test_consolidate_ignores_mapping_keys_missing_from_input_shards(tmp_path, ca
 
 
 @pytest.mark.run_only_on("CPU")
+def test_every_rank_consolidation_skips_resume_only_osft_factors(tmp_path):
+    """OSFT factors are saved for resume only and are left out of both the exported shards and the index."""
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    tensors = {
+        "q_proj.weight": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        "q_proj.osft_U_low": torch.ones(2, 1),
+    }
+    dcp_metadata = {key: {"saved_offsets": [0, 0]} for key in tensors}
+    save_file(
+        tensors,
+        input_dir / "shard-00001-model-00001-of-00001.safetensors",
+        metadata={CUSTOM_METADATA_KEY: json.dumps(dcp_metadata)},
+    )
+
+    consolidate_safetensors_files_on_every_rank(
+        input_dir=str(input_dir),
+        output_dir=str(output_dir),
+        fqn_to_index_mapping={"q_proj.weight": 1},
+    )
+
+    output_tensors = load_file(output_dir / "model-00001-of-00001.safetensors")
+    assert set(output_tensors) == {"q_proj.weight"}
+    torch.testing.assert_close(output_tensors["q_proj.weight"], tensors["q_proj.weight"])
+    with open(output_dir / "model.safetensors.index.json", "r") as f:
+        index = json.load(f)
+    assert index["weight_map"] == {"q_proj.weight": "model-00001-of-00001.safetensors"}
+    assert index["metadata"]["total_size"] == tensors["q_proj.weight"].numel() * 4
+
+
+@pytest.mark.run_only_on("CPU")
 def test_consolidate_keeps_float_when_original_dtype_is_quantized(tmp_path, caplog):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
