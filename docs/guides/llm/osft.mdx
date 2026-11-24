@@ -76,19 +76,71 @@ parameter count depending on matrix shapes (50% for square matrices, 36% overall
   weights under the original parameter names. They load directly with Transformers, vLLM, or another round of
   OSFT for the next task.
 
-## Memory and Throughput
+## Continual Learning Settings
 
-OSFT stores two sets of factors per target in place of the dense weight. Optimizer state is kept only for the
-trainable low-rank factors. Compared with full fine-tuning of the same model:
+For a sequence of tasks, run one OSFT round per task, each starting from the previous round's consolidated
+export. Every round recomputes the SVD, so the frozen subspace grows to cover what earlier tasks added.
 
-- Model and optimizer state per GPU is lower at `unfreeze_rank_ratio` up to roughly 0.5.
-  On Qwen3-8B across 8 GPUs, it is 9.5 GB at 0.25 and 12.0 GB at 0.5, against 12.4 GB for full fine-tuning.
-- The SVDs run once at startup, distributed across ranks. On 8x H100 this takes about 50 seconds for Qwen3-8B.
-- Step time is roughly 1.2x that of full fine-tuning on Qwen3-8B (16k tokens per GPU). Most of the extra time
-  is the factor GEMMs; the projections take about 0.25 seconds per step.
+- **`unfreeze_rank_ratio`:** 0.1 to 0.2 protects prior knowledge well; 0.25 suits a single task. The paper's adaptive
+  allocation freezes 80% of each matrix on average (ratio 0.2). Ratio 0.1 retained earlier tasks best in our
+  reproduction.
+- **Shared embeddings and output head:** when the tasks share an output vocabulary (labels, formats), freeze the
+  input embeddings and the output head. They are outside OSFT's constraint and are the main path of interference
+  between tasks:
 
-## Limitations
+```yaml
+freeze_config:
+  freeze_modules:
+    - path: model.embed_tokens
+    - path: lm_head
+```
+
+## Measured Results
+
+Measured on 8x H100 80GB against [mini_trainer](https://github.com/Red-Hat-AI-Innovation-Team/mini_trainer), the
+paper authors' reference implementation (with Liger kernels and flash-attn).
+
+**Throughput and memory.** Qwen3-8B, 16k tokens per GPU, fp32 master weights, `unfreeze_rank_ratio: 0.25`:
+
+| | Step time | Peak memory / GPU | Model + optimizer state / GPU | Startup to first step |
+|---|---|---|---|---|
+| mini_trainer OSFT | 4.72 s | 22.8 GB | 11.4 GB | 198 s |
+| AutoModel OSFT | 3.96 s | 22.7 GB | 9.5 GB | 77 s |
+| AutoModel full fine-tuning | 3.30 s | 25.8 GB | 12.4 GB | |
+
+- **Across 12 models from 9 families** (Llama, Qwen2/2.5/3, Mistral, Gemma2/3, Granite, OLMo2, Phi-4):
+  - AutoModel OSFT runs 1.1-2.2x faster than mini_trainer.
+  - Peak memory is equal or lower on 11 of 12 models.
+  - Startup is 2-2.5x faster on all 12.
+  - Gemma models need `attn_implementation: flash_attention_2` to get this speed.
+- **Model and optimizer state per GPU** is below full fine-tuning's for `unfreeze_rank_ratio` up to about 0.5.
+- **Step time** is about 1.2x full fine-tuning's. The projections take about 0.25 s per step.
+
+**Quality.** Same data and evaluation for both implementations:
+- **Single task:** held-out task loss and WikiText-2 retention are equal to mini_trainer's on all 12 models.
+- **Paper benchmarks** with the continual-learning settings above (`unfreeze_rank_ratio: 0.1`, embeddings and output
+  head frozen), one configuration for every result:
+  - **Standard continual-learning benchmark, LLaMA-2-7B, 3 task orders:** average accuracy 79.5, against the
+    paper's 79.6.
+  - **TRACE, LLaMA-2-7B-Chat, 8 tasks:** average accuracy 55.1 with backward transfer -2.2, against the paper's
+    48.4 / -7.1.
+  - **General ability after all 8 TRACE tasks:** MMLU 46.8, BBH 40.4, PIQA 77.7 and BoolQ 82.3 are at or above the
+    base model's 47.2, 40.1, 76.3 and 80.6 under the same evaluation.
+
+## Tests
+
+- **Unit tests (CPU):** forward paths against dense, gradient and parameter projection invariants, SVD exactness,
+  state-dict load and export (including base loads that echo the factors), and autocast.
+- **FSDP2 equivalence (2 ranks):** two optimizer steps against a single-process fp32 reference. The grid covers
+  gradient accumulation, both clipping orders, and activation checkpointing.
+- **Determinism:** the backward is bit-identical across runs on CUDA in bf16.
+- **Functional test (L2, 2 GPUs):** training, the resumable checkpoint, the bitwise-identical next update after
+  resume, and the Hugging Face export.
+- **Checkpoint robustness:** the example recipe runs AutoModel's robustness phases 0-4.
+
+## Limits
 
 OSFT currently supports FSDP2 (and single-device) data parallelism. It raises an error when combined with PEFT,
 quantization, FP8, QAT, or tensor, pipeline, or expert parallelism. Target modules must be dense linear layers
-(`torch.nn.Linear` or Transformer Engine `Linear`).
+(`torch.nn.Linear` or Transformer Engine `Linear`); MoE expert weights are not decomposed. Ranks are allocated
+uniformly by `unfreeze_rank_ratio`; the paper's adaptive per-layer allocation is not implemented.
