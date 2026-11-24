@@ -95,3 +95,10 @@ ci:
   recipe_owner: Maxusmusti
   time: "00:45:00"
   nodes: 1
+  # Phases 0-4: HF load parity, train/save, AutoModel reload, vanilla-HF reload of the merged export, and exact
+  # native resume (OSFT factors + optimizer state). Phase 5 (cross-TP reload) is not enabled: OSFT trains with
+  # FSDP2 only, though its dense export is TP-agnostic.
+  checkpoint_robustness:
+    tokenizer_name: Qwen/Qwen3-8B
+    dataset.limit_dataset_samples: 500
+    validation_dataset.limit_dataset_samples: 500
